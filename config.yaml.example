@@ -1,46 +1,46 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # IPTV Relay — config.yaml.example
 #
-# Kopieer dit bestand naar config.yaml en pas de waarden aan:
+# Copy this file to config.yaml and adjust the values:
 #   cp config.yaml.example config.yaml
 # ─────────────────────────────────────────────────────────────────────────────
 
 server:
   host:  "0.0.0.0"   # listen on all interfaces; use 127.0.0.1 for local-only
   port:  2205
-  token: "changeme"  # kies een willekeurige lange string — zit in de playlist-URL
+  token: "changeme"  # pick a random long string — embedded in the playlist URL
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Optie A: streams direct in deze config (toets 1-8 selecteert de stream)
+# Option A: streams defined directly in this config (key 1-8 selects the stream)
 # ─────────────────────────────────────────────────────────────────────────────
 streams:
   1:
-    name: "NPO 1"
-    url:  "http://example.com/npo1/stream.m3u8"
+    name: "Channel One"
+    url:  "http://iptv.example.com/ch1/stream.m3u8"
   2:
-    name: "NPO 2"
-    url:  "http://example.com/npo2/stream.m3u8"
+    name: "Channel Two"
+    url:  "http://iptv.example.com/ch2/stream.m3u8"
   3:
-    name: "NPO 3"
-    url:  "http://example.com/npo3/stream.m3u8"
+    name: "Channel Three"
+    url:  "http://iptv.example.com/ch3/stream.m3u8"
   4:
-    name: "RTL 4"
-    url:  "http://example.com/rtl4/stream"
+    name: "Sports HD"
+    url:  "http://iptv.example.com/sports/stream"
   5:
-    name: "RTL 5"
-    url:  "http://example.com/rtl5/stream"
+    name: "News 24"
+    url:  "http://iptv.example.com/news/stream"
   6:
-    name: "SBS 6"
-    url:  "http://example.com/sbs6/stream"
+    name: "Movies Plus"
+    url:  "http://iptv.example.com/movies/stream"
   7:
-    name: "Veronica"
-    url:  "http://example.com/veronica/stream"
+    name: "Kids TV"
+    url:  "http://iptv.example.com/kids/stream"
   8:
-    name: "Net 5"
-    url:  "http://example.com/net5/stream"
+    name: "Documentary"
+    url:  "http://iptv.example.com/docs/stream"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Optie B: laad streams uit een .m3u bestand
-# Als m3u_file ingesteld is worden de bovenstaande `streams` genegeerd.
+# Option B: load streams from a .m3u file
+# If m3u_file is set, the `streams` above are ignored.
 # ─────────────────────────────────────────────────────────────────────────────
 # m3u_file: "channels.m3u"

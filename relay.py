@@ -244,7 +244,7 @@ async def handle_control(request: web.Request) -> web.Response:
         )
     cur_name = state.streams[cur]["name"] if cur and cur in state.streams else "—"
     html = f"""<!DOCTYPE html>
-<html lang="nl">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -394,9 +394,10 @@ def _print_ui() -> None:
     srv = state.config.get("server", {})
     port = srv.get("port", 8080)
     token = srv.get("token", "changeme")
-    share_url = f"http://94.142.244.36:{port}/playlist-{token}.m3u"
+    host = srv.get("host", "0.0.0.0")
+    share_url = f"http://{host}:{port}/playlist-{token}.m3u"
 
-    control_url = f"http://94.142.244.36:{port}{state.config.get('_control_path', '/control')}"
+    control_url = f"http://{host}:{port}{state.config.get('_control_path', '/control')}"
     header = [
         f"  {_BOLD}IPTV Relay{_RST}".center(BOX_W + 6),
         f"  port {port}".center(BOX_W - 2),
@@ -530,11 +531,11 @@ async def _run(config_path: str, m3u_override: str | None = None) -> None:
     await runner.setup()
     await web.TCPSite(runner, host, port).start()
 
-    base = f"http://94.142.244.36:{port}"
+    base = f"http://{host}:{port}"
     log.info("Listening on http://%s:%d", host, port)
     log.info("Playlist:  %s%s", base, playlist_path)
     log.info("Control:   %s%s", base, control_path)
-    log.info("(deel de Control-URL alleen met collega's die mogen wisselen)")
+    log.info("(only share the Control URL with others you trust to switch streams)")
 
     await _keyboard_loop(config_path)
     await runner.cleanup()
