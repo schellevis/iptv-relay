@@ -1,0 +1,9 @@
+venv/*
+__pycache__/*
+
+# Lokale config met echte tokens/wachtwoorden — gebruik config.yaml.example als sjabloon
+config.yaml
+
+# M3U-bestanden kunnen echte stream-URLs met tokens bevatten
+*.m3u
+*.m3u8

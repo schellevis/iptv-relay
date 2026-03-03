@@ -1,0 +1,46 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# IPTV Relay — config.yaml.example
+#
+# Kopieer dit bestand naar config.yaml en pas de waarden aan:
+#   cp config.yaml.example config.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+
+server:
+  host:  "0.0.0.0"   # listen on all interfaces; use 127.0.0.1 for local-only
+  port:  2205
+  token: "changeme"  # kies een willekeurige lange string — zit in de playlist-URL
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Optie A: streams direct in deze config (toets 1-8 selecteert de stream)
+# ─────────────────────────────────────────────────────────────────────────────
+streams:
+  1:
+    name: "NPO 1"
+    url:  "http://example.com/npo1/stream.m3u8"
+  2:
+    name: "NPO 2"
+    url:  "http://example.com/npo2/stream.m3u8"
+  3:
+    name: "NPO 3"
+    url:  "http://example.com/npo3/stream.m3u8"
+  4:
+    name: "RTL 4"
+    url:  "http://example.com/rtl4/stream"
+  5:
+    name: "RTL 5"
+    url:  "http://example.com/rtl5/stream"
+  6:
+    name: "SBS 6"
+    url:  "http://example.com/sbs6/stream"
+  7:
+    name: "Veronica"
+    url:  "http://example.com/veronica/stream"
+  8:
+    name: "Net 5"
+    url:  "http://example.com/net5/stream"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Optie B: laad streams uit een .m3u bestand
+# Als m3u_file ingesteld is worden de bovenstaande `streams` genegeerd.
+# ─────────────────────────────────────────────────────────────────────────────
+# m3u_file: "channels.m3u"
