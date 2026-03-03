@@ -7,7 +7,7 @@
 
 server:
   host:  "0.0.0.0"   # listen on all interfaces; use 127.0.0.1 for local-only
-  port:  2205
+  port:  8080
   token: "changeme"  # pick a random long string — embedded in the playlist URL
 
 # ─────────────────────────────────────────────────────────────────────────────
