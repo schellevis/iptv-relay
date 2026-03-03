@@ -18,10 +18,13 @@ Endpoints:
 import argparse
 import asyncio
 import collections
+import hashlib
+import hmac
 import logging
 import re
+import secrets
 import sys
-from urllib.parse import quote, unquote, urljoin
+from urllib.parse import quote, urljoin, urlsplit
 
 import aiohttp
 import yaml
@@ -59,6 +62,10 @@ class State:
     streams: dict[int, dict] = {}   # id → {"name": str, "url": str}
     config: dict = {}
     broadcaster: "Broadcaster | None" = None
+    playlist_path: str = "/playlist-changeme.m3u"
+    control_path: str = "/control-changeme"
+    switch_path: str = "/api/switch-changeme"
+    proxy_secret: str = ""
 
 state = State()
 
@@ -103,6 +110,13 @@ class Broadcaster:
             self._task.cancel()
             self._task = None
 
+    def stop(self) -> None:
+        """Force-close current upstream connection."""
+        self._url = None
+        if self._task and not self._task.done():
+            self._task.cancel()
+        self._task = None
+
     async def _run(self, url: str, delay: float = 0.0) -> None:
         if delay:
             await asyncio.sleep(delay)
@@ -144,7 +158,7 @@ class Broadcaster:
 
 def load_config(path: str = "config.yaml") -> None:
     with open(path) as f:
-        state.config = yaml.safe_load(f)
+        state.config = yaml.safe_load(f) or {}
 
     state.streams = {}
 
@@ -196,26 +210,28 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
 
     # HLS sub-playlist / segment passthrough (used when rewriting m3u8 URLs)
     if proxied_url := request.query.get("__url"):
-        real_url = unquote(proxied_url)
-        if _looks_like_segment(real_url):
-            return await _proxy_segment(real_url)
-        return await _proxy_hls_playlist(request, real_url)
+        real_url = proxied_url
+        if not _is_safe_proxy_target(real_url):
+            return web.Response(status=400, text="Unsupported target URL\n")
+        if not _validate_proxy_signature(real_url, request.query.get("__sig", "")):
+            return web.Response(status=403, text="Invalid proxy signature\n")
+        return await _proxy_hls_target(request, real_url)
 
     # Dispatch based on stream URL type
     if ".m3u8" in url:
-        return await _proxy_hls_playlist(request, url)
+        return await _proxy_hls_target(request, url)
     return await _proxy_direct(request)
 
 
 async def handle_playlist(request: web.Request) -> web.Response:
     """Serve a single-entry M3U playlist pointing to /stream."""
     sid = state.current_id
-    name = state.streams[sid]["name"] if sid and sid in state.streams else "IPTV Relay"
+    name = state.streams[sid]["name"] if sid is not None and sid in state.streams else "IPTV Relay"
 
     playlist = (
         "#EXTM3U\n"
         f"#EXTINF:-1,{name}\n"
-        f"http://{request.host}/stream\n"
+        f"{request.scheme}://{request.host}/stream\n"
     )
     return web.Response(text=playlist, content_type="audio/x-mpegurl")
 
@@ -237,12 +253,12 @@ async def handle_control(request: web.Request) -> web.Response:
         active = " active" if k == cur else ""
         stream_items += (
             f'<li class="{active}">'
-            f'<form method="post" action="{state.config["_switch_path"]}">'
+            f'<form method="post" action="{state.switch_path}">'
             f'<input type="hidden" name="id" value="{k}">'
             f'<button type="submit">{k}. {v["name"]}</button>'
             f"</form></li>\n"
         )
-    cur_name = state.streams[cur]["name"] if cur and cur in state.streams else "—"
+    cur_name = state.streams[cur]["name"] if cur is not None and cur in state.streams else "—"
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -286,10 +302,12 @@ async def handle_api_switch(request: web.Request) -> web.Response:
     state.current_id = sid
     log.info("Web: switched to [%d] %s", sid, state.streams[sid]["name"])
     info = state.streams[sid]
-    if ".m3u8" not in info["url"]:
+    if state.broadcaster and ".m3u8" not in info["url"]:
         state.broadcaster.set_url(info["url"])
+    elif state.broadcaster:
+        state.broadcaster.stop()
 
-    raise web.HTTPFound(request.headers.get("Referer", "/control"))
+    raise web.HTTPFound(request.headers.get("Referer", state.control_path))
 
 
 # ── Stream Proxying ───────────────────────────────────────────────────────────
@@ -317,23 +335,44 @@ async def _proxy_direct(request: web.Request) -> web.StreamResponse:
     return resp
 
 
-async def _proxy_hls_playlist(request: web.Request, url: str) -> web.Response:
-    """Fetch an HLS M3U8 playlist and rewrite its URLs to route through us."""
-    base = url.rsplit("/", 1)[0] + "/"
-    server_base = f"http://{request.host}/stream"
+async def _proxy_hls_target(request: web.Request, url: str) -> web.Response:
+    """Fetch HLS target URL: rewrite playlists, pass through media assets."""
+    base = urljoin(url, "./")
+    server_base = f"{request.scheme}://{request.host}/stream"
+    timeout = aiohttp.ClientTimeout(connect=10, sock_read=30)
 
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(url) as upstream:
-                if upstream.status >= 400:
-                    return web.Response(status=502, text="Upstream playlist error\n")
-                text = await upstream.text()
+                status = upstream.status
+                body = await upstream.read()
+                content_type = upstream.headers.get("Content-Type", "")
+                cache_control = upstream.headers.get("Cache-Control")
+                etag = upstream.headers.get("ETag")
+                charset = upstream.charset or "utf-8"
     except aiohttp.ClientError as e:
-        log.error("Failed to fetch playlist %s: %s", url, e)
+        log.error("Failed to fetch HLS target %s: %s", url, e)
         return web.Response(status=502, text="Could not reach upstream\n")
 
-    rewritten = _rewrite_m3u8(text, base, server_base)
-    return web.Response(text=rewritten, content_type="application/vnd.apple.mpegurl")
+    if status >= 400:
+        return web.Response(status=502, text=f"Upstream returned {status}\n")
+
+    if _is_hls_playlist(url, content_type, body):
+        try:
+            text = body.decode(charset, errors="replace")
+        except LookupError:
+            text = body.decode("utf-8", errors="replace")
+        rewritten = _rewrite_m3u8(text, base, server_base)
+        return web.Response(text=rewritten, content_type="application/vnd.apple.mpegurl")
+
+    headers = {}
+    if content_type:
+        headers["Content-Type"] = content_type
+    if cache_control:
+        headers["Cache-Control"] = cache_control
+    if etag:
+        headers["ETag"] = etag
+    return web.Response(status=status, body=body, headers=headers)
 
 
 def _rewrite_m3u8(content: str, base_url: str, server_base: str) -> str:
@@ -341,29 +380,71 @@ def _rewrite_m3u8(content: str, base_url: str, server_base: str) -> str:
     out = []
     for line in content.splitlines():
         s = line.strip()
-        if s and not s.startswith("#"):
-            full = s if s.startswith("http") else urljoin(base_url, s)
-            line = f"{server_base}?__url={quote(full, safe='')}"
+        if s.startswith("#"):
+            line = re.sub(
+                r'URI="([^"]+)"',
+                lambda m: _rewrite_uri_attr(m, base_url, server_base),
+                line,
+            )
+        elif s:
+            full = _resolve_hls_ref(s, base_url)
+            line = _build_proxy_url(full, server_base)
         out.append(line)
     return "\n".join(out)
 
 
-async def _proxy_segment(url: str) -> web.Response:
-    """Fetch and return a single HLS segment."""
+def _rewrite_uri_attr(match: re.Match[str], base_url: str, server_base: str) -> str:
+    raw = match.group(1).strip()
+    if raw.startswith("data:"):
+        return match.group(0)
+    full = _resolve_hls_ref(raw, base_url)
+    return f'URI="{_build_proxy_url(full, server_base)}"'
+
+
+def _resolve_hls_ref(ref: str, base_url: str) -> str:
+    if ref.startswith(("http://", "https://")):
+        return ref
+    return urljoin(base_url, ref)
+
+
+def _proxy_signature(url: str) -> str:
+    if not state.proxy_secret:
+        return ""
+    return hmac.new(
+        state.proxy_secret.encode("utf-8"),
+        url.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _build_proxy_url(url: str, server_base: str) -> str:
+    sig = _proxy_signature(url)
+    return f"{server_base}?__url={quote(url, safe='')}&__sig={sig}"
+
+
+def _validate_proxy_signature(url: str, signature: str) -> bool:
+    expected = _proxy_signature(url)
+    return bool(signature and expected) and hmac.compare_digest(signature, expected)
+
+
+def _is_safe_proxy_target(url: str) -> bool:
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as upstream:
-                data = await upstream.read()
-                ct = upstream.headers.get("Content-Type", "video/mp2t")
-        return web.Response(body=data, content_type=ct)
-    except aiohttp.ClientError as e:
-        log.error("Segment fetch error: %s", e)
-        return web.Response(status=502, text="Segment unavailable\n")
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    return parts.scheme in ("http", "https") and bool(parts.netloc)
 
 
-def _looks_like_segment(url: str) -> bool:
-    path = url.split("?")[0].lower()
-    return path.endswith((".ts", ".aac", ".mp4", ".fmp4", ".m4s"))
+def _is_hls_playlist(url: str, content_type: str, body: bytes) -> bool:
+    path = urlsplit(url).path.lower()
+    if path.endswith(".m3u8"):
+        return True
+
+    ct = content_type.lower()
+    if "mpegurl" in ct:
+        return True
+
+    return body.lstrip().startswith(b"#EXTM3U")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -393,11 +474,10 @@ def _box(lines: list[str]) -> str:
 def _print_ui() -> None:
     srv = state.config.get("server", {})
     port = srv.get("port", 8080)
-    token = srv.get("token", "changeme")
     host = srv.get("host", "0.0.0.0")
-    share_url = f"http://{host}:{port}/playlist-{token}.m3u"
+    share_url = f"http://{host}:{port}{state.playlist_path}"
 
-    control_url = f"http://{host}:{port}{state.config.get('_control_path', '/control')}"
+    control_url = f"http://{host}:{port}{state.control_path}"
     header = [
         f"  {_BOLD}IPTV Relay{_RST}".center(BOX_W + 6),
         f"  port {port}".center(BOX_W - 2),
@@ -458,7 +538,25 @@ async def _keyboard_loop(config_path: str) -> None:
 
             elif ch == "r":
                 buf = ""
+                old_token = state.config.get("server", {}).get("token", "changeme")
                 load_config(config_path)
+                new_token = state.config.get("server", {}).get("token", "changeme")
+                if new_token != old_token:
+                    log.warning("Server token changed in config; restart required to apply new URL paths")
+
+                if not state.streams:
+                    state.current_id = None
+                elif state.current_id not in state.streams:
+                    state.current_id = min(state.streams)
+
+                if state.broadcaster and state.current_id is None:
+                    state.broadcaster.stop()
+                elif state.broadcaster and state.current_id is not None:
+                    info = state.streams[state.current_id]
+                    if ".m3u8" not in info["url"]:
+                        state.broadcaster.set_url(info["url"])
+                    else:
+                        state.broadcaster.stop()
                 _print_ui()
                 print("Config reloaded.", end="\r\n", flush=True)
 
@@ -475,8 +573,10 @@ async def _keyboard_loop(config_path: str) -> None:
                         state.current_id = sid
                         log.info("Switched to [%d] %s", sid, state.streams[sid]["name"])
                         info = state.streams[sid]
-                        if ".m3u8" not in info["url"]:
+                        if state.broadcaster and ".m3u8" not in info["url"]:
                             state.broadcaster.set_url(info["url"])
+                        elif state.broadcaster:
+                            state.broadcaster.stop()
                         _print_ui()
                     else:
                         _print_ui()
@@ -512,20 +612,17 @@ async def _run(config_path: str, m3u_override: str | None = None) -> None:
     host = srv.get("host", "0.0.0.0")
     port = int(srv.get("port", 8080))
     token = srv.get("token", "changeme")
-    playlist_path  = f"/playlist-{token}.m3u"
-    control_path   = f"/control-{token}"
-    switch_path    = f"/api/switch-{token}"
-
-    # Store paths so handlers and _print_ui can use them
-    state.config["_switch_path"]  = switch_path
-    state.config["_control_path"] = control_path
+    state.playlist_path = f"/playlist-{token}.m3u"
+    state.control_path = f"/control-{token}"
+    state.switch_path = f"/api/switch-{token}"
+    state.proxy_secret = secrets.token_hex(32)
 
     app = web.Application()
     app.router.add_get("/stream",      handle_stream)
-    app.router.add_get(playlist_path,  handle_playlist)
+    app.router.add_get(state.playlist_path,  handle_playlist)
     app.router.add_get("/status",      handle_status)
-    app.router.add_get(control_path,   handle_control)
-    app.router.add_post(switch_path,   handle_api_switch)
+    app.router.add_get(state.control_path,   handle_control)
+    app.router.add_post(state.switch_path,   handle_api_switch)
 
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
@@ -533,8 +630,8 @@ async def _run(config_path: str, m3u_override: str | None = None) -> None:
 
     base = f"http://{host}:{port}"
     log.info("Listening on http://%s:%d", host, port)
-    log.info("Playlist:  %s%s", base, playlist_path)
-    log.info("Control:   %s%s", base, control_path)
+    log.info("Playlist:  %s%s", base, state.playlist_path)
+    log.info("Control:   %s%s", base, state.control_path)
     log.info("(only share the Control URL with others you trust to switch streams)")
 
     await _keyboard_loop(config_path)
