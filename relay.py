@@ -279,7 +279,7 @@ async def handle_control(request: web.Request) -> web.Response:
         if cur is not None and cur in state.streams
         else "—"
     )
-    html = f"""<!DOCTYPE html>
+    page = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -306,7 +306,7 @@ async def handle_control(request: web.Request) -> web.Response:
 {stream_items}</ul>
 </body>
 </html>"""
-    return web.Response(text=html, content_type="text/html")
+    return web.Response(text=page, content_type="text/html")
 
 
 async def handle_api_switch(request: web.Request) -> web.Response:
