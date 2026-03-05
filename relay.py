@@ -10,20 +10,24 @@ Usage:
     python relay.py [--config config.yaml]
 
 Endpoints:
-    /stream         → the currently active stream (proxied)
-    /playlist.m3u   → shareable M3U playlist pointing to /stream
-    /status         → plain-text status overview
+    /stream-{token}      → the currently active stream (proxied)
+    /playlist-{token}.m3u → shareable M3U playlist
+    /status-{token}      → plain-text status overview
 """
 
 import argparse
 import asyncio
 import collections
+import html
 import hashlib
 import hmac
+import ipaddress
 import logging
 import re
 import secrets
+import socket
 import sys
+import time
 from urllib.parse import quote, urljoin, urlsplit
 
 import aiohttp
@@ -53,6 +57,8 @@ logging.basicConfig(level=logging.INFO, handlers=[_UILogHandler()])
 log = logging.getLogger(__name__)
 
 CHUNK = 65_536  # bytes per read from upstream
+HOST_CHECK_TTL = 120.0  # seconds
+_host_check_cache: dict[tuple[str, int], tuple[float, bool]] = {}
 
 
 # ── State ─────────────────────────────────────────────────────────────────────
@@ -62,7 +68,9 @@ class State:
     streams: dict[int, dict] = {}   # id → {"name": str, "url": str}
     config: dict = {}
     broadcaster: "Broadcaster | None" = None
+    stream_path: str = "/stream-changeme"
     playlist_path: str = "/playlist-changeme.m3u"
+    status_path: str = "/status-changeme"
     control_path: str = "/control-changeme"
     switch_path: str = "/api/switch-changeme"
     proxy_secret: str = ""
@@ -211,7 +219,7 @@ async def handle_stream(request: web.Request) -> web.StreamResponse:
     # HLS sub-playlist / segment passthrough (used when rewriting m3u8 URLs)
     if proxied_url := request.query.get("__url"):
         real_url = proxied_url
-        if not _is_safe_proxy_target(real_url):
+        if not await _is_safe_proxy_target(real_url, allow_private_hosts=_private_proxy_hosts()):
             return web.Response(status=400, text="Unsupported target URL\n")
         if not _validate_proxy_signature(real_url, request.query.get("__sig", "")):
             return web.Response(status=403, text="Invalid proxy signature\n")
@@ -227,11 +235,13 @@ async def handle_playlist(request: web.Request) -> web.Response:
     """Serve a single-entry M3U playlist pointing to /stream."""
     sid = state.current_id
     name = state.streams[sid]["name"] if sid is not None and sid in state.streams else "IPTV Relay"
+    safe_name = name.replace("\r", " ").replace("\n", " ")
+    stream_url = f"{_public_base_url()}{state.stream_path}"
 
     playlist = (
         "#EXTM3U\n"
-        f"#EXTINF:-1,{name}\n"
-        f"{request.scheme}://{request.host}/stream\n"
+        f"#EXTINF:-1,{safe_name}\n"
+        f"{stream_url}\n"
     )
     return web.Response(text=playlist, content_type="audio/x-mpegurl")
 
@@ -251,14 +261,19 @@ async def handle_control(request: web.Request) -> web.Response:
     stream_items = ""
     for k, v in sorted(state.streams.items()):
         active = " active" if k == cur else ""
+        safe_name = html.escape(v["name"], quote=False)
         stream_items += (
             f'<li class="{active}">'
             f'<form method="post" action="{state.switch_path}">'
             f'<input type="hidden" name="id" value="{k}">'
-            f'<button type="submit">{k}. {v["name"]}</button>'
+            f'<button type="submit">{k}. {safe_name}</button>'
             f"</form></li>\n"
         )
-    cur_name = state.streams[cur]["name"] if cur is not None and cur in state.streams else "—"
+    cur_name = (
+        html.escape(state.streams[cur]["name"], quote=False)
+        if cur is not None and cur in state.streams
+        else "—"
+    )
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -307,7 +322,7 @@ async def handle_api_switch(request: web.Request) -> web.Response:
     elif state.broadcaster:
         state.broadcaster.stop()
 
-    raise web.HTTPFound(request.headers.get("Referer", state.control_path))
+    raise web.HTTPFound(state.control_path)
 
 
 # ── Stream Proxying ───────────────────────────────────────────────────────────
@@ -338,7 +353,7 @@ async def _proxy_direct(request: web.Request) -> web.StreamResponse:
 async def _proxy_hls_target(request: web.Request, url: str) -> web.Response:
     """Fetch HLS target URL: rewrite playlists, pass through media assets."""
     base = urljoin(url, "./")
-    server_base = f"{request.scheme}://{request.host}/stream"
+    server_base = f"{_public_base_url()}{state.stream_path}"
     timeout = aiohttp.ClientTimeout(connect=10, sock_read=30)
 
     try:
@@ -427,12 +442,101 @@ def _validate_proxy_signature(url: str, signature: str) -> bool:
     return bool(signature and expected) and hmac.compare_digest(signature, expected)
 
 
-def _is_safe_proxy_target(url: str) -> bool:
+def _private_proxy_hosts() -> set[str]:
+    hosts: set[str] = set()
+
+    sid = state.current_id
+    if sid is not None and sid in state.streams:
+        stream_url = state.streams[sid]["url"]
+        try:
+            parsed = urlsplit(stream_url)
+            if parsed.hostname:
+                hosts.add(parsed.hostname.strip().lower())
+        except ValueError:
+            pass
+
+    extra = state.config.get("server", {}).get("proxy_allow_private_hosts", [])
+    if isinstance(extra, list):
+        for host in extra:
+            if isinstance(host, str) and host.strip():
+                hosts.add(host.strip().lower())
+    return hosts
+
+
+async def _is_safe_proxy_target(url: str, allow_private_hosts: set[str] | None = None) -> bool:
     try:
         parts = urlsplit(url)
     except ValueError:
         return False
-    return parts.scheme in ("http", "https") and bool(parts.netloc)
+    if parts.scheme not in ("http", "https") or not parts.netloc or not parts.hostname:
+        return False
+    host = parts.hostname.strip().lower()
+    if allow_private_hosts and host in allow_private_hosts:
+        return True
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    return await _host_is_public(host, port)
+
+
+def _public_base_url() -> str:
+    srv = state.config.get("server", {})
+    if raw := srv.get("public_base_url"):
+        return str(raw).rstrip("/")
+
+    scheme = str(srv.get("public_scheme", "http")).lower()
+    host = str(srv.get("public_host") or srv.get("host", "127.0.0.1"))
+    port = int(srv.get("public_port", srv.get("port", 8080)))
+    host_for_url = f"[{host}]" if ":" in host and not host.startswith("[") else host
+
+    if (scheme == "http" and port == 80) or (scheme == "https" and port == 443):
+        return f"{scheme}://{host_for_url}"
+    return f"{scheme}://{host_for_url}:{port}"
+
+
+async def _host_is_public(host: str, port: int) -> bool:
+    cache_key = (host, port)
+    now = time.monotonic()
+    if cached := _host_check_cache.get(cache_key):
+        ts, safe = cached
+        if now - ts < HOST_CHECK_TTL:
+            return safe
+
+    safe = await asyncio.to_thread(_resolve_host_public, host, port)
+    _host_check_cache[cache_key] = (now, safe)
+    return safe
+
+
+def _resolve_host_public(host: str, port: int) -> bool:
+    if host in {"localhost", "localhost.localdomain"} or host.endswith(".local"):
+        return False
+
+    # Literal IP host.
+    try:
+        addr = ipaddress.ip_address(host)
+        return addr.is_global
+    except ValueError:
+        pass
+
+    try:
+        infos = socket.getaddrinfo(
+            host,
+            port,
+            type=socket.SOCK_STREAM,
+            proto=socket.IPPROTO_TCP,
+        )
+    except socket.gaierror:
+        return False
+
+    resolved_ips = {info[4][0] for info in infos if info and info[4]}
+    if not resolved_ips:
+        return False
+
+    for ip in resolved_ips:
+        try:
+            if not ipaddress.ip_address(ip).is_global:
+                return False
+        except ValueError:
+            return False
+    return True
 
 
 def _is_hls_playlist(url: str, content_type: str, body: bytes) -> bool:
@@ -474,10 +578,8 @@ def _box(lines: list[str]) -> str:
 def _print_ui() -> None:
     srv = state.config.get("server", {})
     port = srv.get("port", 8080)
-    host = srv.get("host", "0.0.0.0")
-    share_url = f"http://{host}:{port}{state.playlist_path}"
-
-    control_url = f"http://{host}:{port}{state.control_path}"
+    share_url = f"{_public_base_url()}{state.playlist_path}"
+    control_url = f"{_public_base_url()}{state.control_path}"
     header = [
         f"  {_BOLD}IPTV Relay{_RST}".center(BOX_W + 6),
         f"  port {port}".center(BOX_W - 2),
@@ -612,15 +714,21 @@ async def _run(config_path: str, m3u_override: str | None = None) -> None:
     host = srv.get("host", "0.0.0.0")
     port = int(srv.get("port", 8080))
     token = srv.get("token", "changeme")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", token):
+        raise ValueError(
+            "server.token must be 8-128 chars and contain only A-Z, a-z, 0-9, '_' or '-'"
+        )
+    state.stream_path = f"/stream-{token}"
     state.playlist_path = f"/playlist-{token}.m3u"
+    state.status_path = f"/status-{token}"
     state.control_path = f"/control-{token}"
     state.switch_path = f"/api/switch-{token}"
     state.proxy_secret = secrets.token_hex(32)
 
     app = web.Application()
-    app.router.add_get("/stream",      handle_stream)
+    app.router.add_get(state.stream_path,    handle_stream)
     app.router.add_get(state.playlist_path,  handle_playlist)
-    app.router.add_get("/status",      handle_status)
+    app.router.add_get(state.status_path,    handle_status)
     app.router.add_get(state.control_path,   handle_control)
     app.router.add_post(state.switch_path,   handle_api_switch)
 
@@ -652,6 +760,9 @@ def main() -> None:
 
     try:
         asyncio.run(_run(args.config, m3u_override=args.m3u))
+    except ValueError as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        sys.exit(2)
     except KeyboardInterrupt:
         pass
 

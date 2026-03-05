@@ -42,6 +42,8 @@ Copy `config.yaml.example` to `config.yaml` (listed in `.gitignore`):
 | `server.host` | Listen address (`0.0.0.0` = all interfaces)              |
 | `server.port` | Port number                                              |
 | `server.token`| Random string — embedded in the playlist URL             |
+| `server.public_base_url` | Optional externally shared base URL (e.g. `https://tv.example.com`) |
+| `server.proxy_allow_private_hosts` | Optional list of private hosts allowed for HLS segment proxying |
 | `streams`     | Numbered streams (name + URL)                            |
 | `m3u_file`    | Alternative: load streams from a .m3u file               |
 
@@ -60,10 +62,10 @@ All URLs contain the token from the config as security.
 
 | URL                          | Description                                      |
 |------------------------------|--------------------------------------------------|
-| `/stream`                    | Active stream (proxied; works in VLC, Kodi)      |
+| `/stream-{token}`            | Active stream (proxied; works in VLC, Kodi)      |
 | `/playlist-{token}.m3u`      | M3U playlist to share with others                |
 | `/control-{token}`           | Web UI: switch streams via browser               |
-| `/status`                    | Plaintext overview of streams                    |
+| `/status-{token}`            | Plaintext overview of streams                    |
 
 ### Sharing with others
 
