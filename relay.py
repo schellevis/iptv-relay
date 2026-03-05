@@ -490,12 +490,63 @@ def _public_base_url() -> str:
 
     scheme = str(srv.get("public_scheme", "http")).lower()
     host = str(srv.get("public_host") or srv.get("host", "127.0.0.1"))
+    host = _host_for_generated_urls(host)
     port = int(srv.get("public_port", srv.get("port", 8080)))
     host_for_url = f"[{host}]" if ":" in host and not host.startswith("[") else host
 
     if (scheme == "http" and port == 80) or (scheme == "https" and port == 443):
         return f"{scheme}://{host_for_url}"
     return f"{scheme}://{host_for_url}:{port}"
+
+
+def _host_for_generated_urls(host: str) -> str:
+    normalized = host.strip().strip("[]")
+    if normalized not in {"", "0.0.0.0", "::"}:
+        return normalized
+
+    # Bind-all addresses are not valid for clients; prefer a reachable local IP.
+    if detected := _detect_local_ip():
+        return detected
+    return "127.0.0.1"
+
+
+def _detect_local_ip() -> str | None:
+    targets = [("8.8.8.8", 80), ("1.1.1.1", 80)]
+    for target in targets:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect(target)
+                ip = s.getsockname()[0]
+            if ip and not ip.startswith("127."):
+                return ip
+        except OSError:
+            continue
+
+    try:
+        infos = socket.getaddrinfo(socket.gethostname(), None, type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        return None
+
+    # Prefer non-loopback IPv4 as most IPTV clients expect this.
+    for info in infos:
+        ip = info[4][0]
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            continue
+        if isinstance(addr, ipaddress.IPv4Address) and not addr.is_loopback:
+            return ip
+
+    for info in infos:
+        ip = info[4][0]
+        try:
+            addr = ipaddress.ip_address(ip)
+        except ValueError:
+            continue
+        if isinstance(addr, ipaddress.IPv6Address) and not addr.is_loopback:
+            return ip
+
+    return None
 
 
 async def _host_is_public(host: str, port: int) -> bool:

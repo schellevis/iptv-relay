@@ -47,6 +47,8 @@ Copy `config.yaml.example` to `config.yaml` (listed in `.gitignore`):
 | `streams`     | Numbered streams (name + URL)                            |
 | `m3u_file`    | Alternative: load streams from a .m3u file               |
 
+If `server.public_base_url` is not set and `server.host` is `0.0.0.0`/`::`, the relay auto-detects a local IP for generated links.
+
 ## CLI controls
 
 | Key / input      | Action                         |
