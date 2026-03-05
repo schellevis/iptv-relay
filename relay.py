@@ -176,6 +176,11 @@ def load_config(path: str = "config.yaml") -> None:
         for k, v in state.config.get("streams", {}).items():
             state.streams[int(k)] = {"name": v["name"], "url": v["url"]}
 
+    max_streams = int(state.config.get("server", {}).get("max_streams", 30))
+    if len(state.streams) > max_streams:
+        keys = sorted(state.streams.keys())[:max_streams]
+        state.streams = {k: state.streams[k] for k in keys}
+
     log.info("Loaded %d stream(s)", len(state.streams))
 
 
@@ -288,7 +293,8 @@ async def handle_control(request: web.Request) -> web.Response:
   ul {{ list-style: none; padding: 0; }}
   li {{ margin: .4rem 0; }}
   button {{ width: 100%; padding: .6rem 1rem; font-size: 1rem;
-            background: #f0f0f0; border: 1px solid #ccc; border-radius: 6px; cursor: pointer; text-align: left; }}
+            -webkit-appearance: none; appearance: none;
+            background: #f0f0f0; color: #000; border: 1px solid #ccc; border-radius: 6px; cursor: pointer; text-align: left; }}
   li.active button {{ background: #2563eb; color: #fff; border-color: #2563eb; font-weight: bold; }}
   button:hover {{ opacity: .85; }}
 </style>
