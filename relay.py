@@ -241,7 +241,7 @@ async def handle_playlist(request: web.Request) -> web.Response:
     sid = state.current_id
     name = state.streams[sid]["name"] if sid is not None and sid in state.streams else "IPTV Relay"
     safe_name = name.replace("\r", " ").replace("\n", " ")
-    stream_url = f"{_public_base_url()}{state.stream_path}"
+    stream_url = f"{_request_base_url(request)}{state.stream_path}"
 
     playlist = (
         "#EXTM3U\n"
@@ -359,7 +359,7 @@ async def _proxy_direct(request: web.Request) -> web.StreamResponse:
 async def _proxy_hls_target(request: web.Request, url: str) -> web.Response:
     """Fetch HLS target URL: rewrite playlists, pass through media assets."""
     base = urljoin(url, "./")
-    server_base = f"{_public_base_url()}{state.stream_path}"
+    server_base = f"{_request_base_url(request)}{state.stream_path}"
     timeout = aiohttp.ClientTimeout(connect=10, sock_read=30)
 
     try:
@@ -489,7 +489,7 @@ def _public_base_url() -> str:
         return str(raw).rstrip("/")
 
     scheme = str(srv.get("public_scheme", "http")).lower()
-    host = str(srv.get("public_host") or srv.get("host", "127.0.0.1"))
+    host = str(srv.get("public_ip") or srv.get("public_host") or srv.get("host", "127.0.0.1"))
     host = _host_for_generated_urls(host)
     port = int(srv.get("public_port", srv.get("port", 8080)))
     host_for_url = f"[{host}]" if ":" in host and not host.startswith("[") else host
@@ -497,6 +497,32 @@ def _public_base_url() -> str:
     if (scheme == "http" and port == 80) or (scheme == "https" and port == 443):
         return f"{scheme}://{host_for_url}"
     return f"{scheme}://{host_for_url}:{port}"
+
+
+def _request_base_url(request: web.Request) -> str:
+    srv = state.config.get("server", {})
+    if raw := srv.get("public_base_url"):
+        return str(raw).rstrip("/")
+
+    # Use the exact address the client requested, unless it's a wildcard bind host.
+    try:
+        parsed = urlsplit(f"{request.scheme}://{request.host}")
+    except ValueError:
+        return _public_base_url()
+
+    req_host = parsed.hostname
+    if not req_host:
+        return _public_base_url()
+    req_host = _host_for_generated_urls(req_host)
+
+    req_port = parsed.port
+    if req_port is None:
+        req_port = 443 if request.scheme == "https" else 80
+    host_for_url = f"[{req_host}]" if ":" in req_host and not req_host.startswith("[") else req_host
+
+    if (request.scheme == "http" and req_port == 80) or (request.scheme == "https" and req_port == 443):
+        return f"{request.scheme}://{host_for_url}"
+    return f"{request.scheme}://{host_for_url}:{req_port}"
 
 
 def _host_for_generated_urls(host: str) -> str:

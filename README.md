@@ -43,11 +43,13 @@ Copy `config.yaml.example` to `config.yaml` (listed in `.gitignore`):
 | `server.port` | Port number                                              |
 | `server.token`| Random string — embedded in the playlist URL             |
 | `server.public_base_url` | Optional externally shared base URL (e.g. `https://tv.example.com`) |
+| `server.public_ip` | Optional fixed IP/host for generated links (when no `public_base_url`) |
 | `server.proxy_allow_private_hosts` | Optional list of private hosts allowed for HLS segment proxying |
 | `streams`     | Numbered streams (name + URL)                            |
 | `m3u_file`    | Alternative: load streams from a .m3u file               |
 
-If `server.public_base_url` is not set and `server.host` is `0.0.0.0`/`::`, the relay auto-detects a local IP for generated links.
+If `server.public_base_url` is not set, the relay uses the host/IP from the incoming request for generated links.  
+Set `server.public_ip` to force a fixed value.
 
 ## CLI controls
 

@@ -12,6 +12,8 @@ server:
   # Optional: external/public base URL used in generated playlist/HLS links
   # (recommended; avoids auto-detection and is best behind NAT/reverse proxy)
   # public_base_url: "https://tv.example.com"
+  # Optional: force a fixed public IP/host for generated links
+  # public_ip: "192.168.1.123"
   # Optional: allow these private hosts for HLS sub-request proxying
   # proxy_allow_private_hosts: ["192.168.1.50", "iptv.lan"]
 
